@@ -1,7 +1,11 @@
 package org.jellyfin.androidtv.ui.playback
 
 import android.content.ActivityNotFoundException
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
 import android.os.Bundle
 import android.os.SystemClock
 import android.widget.Toast
@@ -42,6 +46,7 @@ import org.koin.android.ext.android.inject
 import timber.log.Timber
 import java.io.File
 import java.time.Instant
+import kotlin.math.max
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -52,7 +57,7 @@ import kotlin.time.Duration.Companion.milliseconds
 class ExternalPlayerActivity : FragmentActivity() {
 	companion object {
 		const val EXTRA_POSITION = "position"
-		private const val EXTERNAL_PLAYBACK_PROGRESS_INTERVAL_MS = 10_000L
+		private const val EXTERNAL_PLAYBACK_PROGRESS_INTERVAL_MS = 5_000L
 
 		// https://mx.j2inter.com/api
 		private const val API_MX_TITLE = "title"
@@ -80,6 +85,11 @@ class ExternalPlayerActivity : FragmentActivity() {
 
 		// The extra keys used by various video players to read the end position
 		private val resultPositionExtras = arrayOf(API_MX_RESULT_POSITION, API_VLC_RESULT_POSITION)
+		private val vlcPackageNames = setOf(
+			"org.videolan.vlc",
+			"org.videolan.vlc.debug",
+			"org.videolan.vlc.betav7neon",
+		)
 	}
 
 	private val videoQueueManager by inject<VideoQueueManager>()
@@ -107,7 +117,23 @@ class ExternalPlayerActivity : FragmentActivity() {
 	private var currentItem: Pair<BaseItemDto, MediaSourceInfo>? = null
 	private var externalPlaybackStartElapsedMs = 0L
 	private var externalPlaybackStartPosition = Duration.ZERO
+	private var externalPlaybackStartPositionMs = 0L
+	private var trackedExternalPositionMs: Long? = null
+	private var lastProgressElapsedMs = 0L
+	private var lastKnownVlcState: Int? = null
 	private var externalPlaybackProgressJob: Job? = null
+
+	private data class VlcPlaybackSnapshot(
+		val state: Int,
+		val stateName: String,
+		val positionMs: Long?,
+		val lastPositionUpdateTimeMs: Long?,
+	)
+
+	private data class TrackedExternalPlaybackPosition(
+		val positionMs: Long,
+		val paused: Boolean,
+	)
 
 	override fun onCreate(savedInstanceState: Bundle?) {
 		super.onCreate(savedInstanceState)
@@ -194,8 +220,13 @@ class ExternalPlayerActivity : FragmentActivity() {
 		}
 
 		lifecycleScope.launch {
-			externalPlaybackStartElapsedMs = SystemClock.elapsedRealtime()
+			val now = SystemClock.elapsedRealtime()
+			externalPlaybackStartElapsedMs = now
 			externalPlaybackStartPosition = position
+			externalPlaybackStartPositionMs = position.inWholeMilliseconds
+			trackedExternalPositionMs = externalPlaybackStartPositionMs
+			lastProgressElapsedMs = now
+			lastKnownVlcState = null
 
 			val playbackStartReported = reportExternalPlaybackStart(item, mediaSource, position)
 			if (playbackStartReported) startExternalPlaybackProgressJob(item, mediaSource)
@@ -267,7 +298,8 @@ class ExternalPlayerActivity : FragmentActivity() {
 		externalPlaybackProgressJob = lifecycleScope.launch {
 			while (isActive) {
 				delay(EXTERNAL_PLAYBACK_PROGRESS_INTERVAL_MS)
-				reportExternalPlaybackProgress(item, mediaSource, getEstimatedExternalPlaybackPosition())
+				val position = updateTrackedExternalPlaybackPosition()
+				reportExternalPlaybackProgress(item, mediaSource, position.positionMs.milliseconds, position.paused)
 			}
 		}
 	}
@@ -285,10 +317,129 @@ class ExternalPlayerActivity : FragmentActivity() {
 		return externalPlaybackStartPosition + elapsedMs.milliseconds
 	}
 
+	private fun getPauseAwareTrackedExternalPlaybackPositionForStop(): Duration? {
+		val trackedPositionMs = trackedExternalPositionMs ?: return null
+		val now = SystemClock.elapsedRealtime()
+		val vlcState = queryVlcPlaybackState()
+		val state = vlcState?.state ?: lastKnownVlcState
+		val positionMs = if (state == PlaybackState.STATE_PLAYING) {
+			trackedPositionMs + (now - lastProgressElapsedMs).coerceAtLeast(0L)
+		} else {
+			trackedPositionMs
+		}
+		val vlcPositionMs = vlcState?.positionMs
+		val finalPositionMs = if (vlcPositionMs != null && vlcPositionMs > 0) max(positionMs, vlcPositionMs)
+		else positionMs
+
+		return finalPositionMs.milliseconds
+	}
+
+	private fun updateTrackedExternalPlaybackPosition(): TrackedExternalPlaybackPosition {
+		val now = SystemClock.elapsedRealtime()
+		val elapsedMs = (now - lastProgressElapsedMs).coerceAtLeast(0L)
+		val currentPositionMs = trackedExternalPositionMs ?: getEstimatedExternalPlaybackPosition().inWholeMilliseconds
+		val vlcState = queryVlcPlaybackState()
+
+		val updatedPositionMs = when (vlcState?.state) {
+			PlaybackState.STATE_PLAYING -> {
+				val updatedPosition = currentPositionMs + elapsedMs
+				Timber.i("External playback playing; advancing tracked position to $updatedPosition")
+				updatedPosition
+			}
+
+			PlaybackState.STATE_PAUSED,
+			PlaybackState.STATE_BUFFERING,
+			PlaybackState.STATE_STOPPED,
+			PlaybackState.STATE_NONE,
+				-> {
+				Timber.i("External playback paused; not advancing tracked position")
+				currentPositionMs
+			}
+
+			null -> {
+				Timber.w("VLC media session unavailable; falling back to estimated external playback position")
+				currentPositionMs + elapsedMs
+			}
+
+			else -> {
+				Timber.w("Unknown VLC media session state=${vlcState.stateName}; falling back to estimated external playback position")
+				currentPositionMs + elapsedMs
+			}
+		}
+
+		val vlcPositionMs = vlcState?.positionMs
+		val trackedPositionMs = if (vlcPositionMs != null && vlcPositionMs > 0) max(updatedPositionMs, vlcPositionMs)
+		else updatedPositionMs
+
+		trackedExternalPositionMs = trackedPositionMs
+		lastProgressElapsedMs = now
+		lastKnownVlcState = vlcState?.state
+
+		return TrackedExternalPlaybackPosition(
+			positionMs = trackedPositionMs,
+			paused = when (vlcState?.state) {
+				PlaybackState.STATE_PAUSED,
+				PlaybackState.STATE_BUFFERING,
+				PlaybackState.STATE_STOPPED,
+				PlaybackState.STATE_NONE,
+					-> true
+
+				else -> false
+			}
+		)
+	}
+
+	private fun queryVlcPlaybackState(): VlcPlaybackSnapshot? {
+		val mediaSessionManager = getSystemService(Context.MEDIA_SESSION_SERVICE) as? MediaSessionManager ?: return null
+		val notificationListener = ComponentName(this, ExternalPlayerNotificationListenerService::class.java)
+
+		return try {
+			mediaSessionManager.getActiveSessions(notificationListener).firstNotNullOfOrNull { controller ->
+				val packageName = controller.packageName
+				if (!isVlcPackage(packageName)) return@firstNotNullOfOrNull null
+
+				val playbackState = controller.playbackState ?: return@firstNotNullOfOrNull null
+				val positionMs = playbackState.position.takeIf { it > 0 }
+				val snapshot = VlcPlaybackSnapshot(
+					state = playbackState.state,
+					stateName = playbackState.stateName,
+					positionMs = positionMs,
+					lastPositionUpdateTimeMs = playbackState.lastPositionUpdateTime.takeIf { it > 0 },
+				)
+				Timber.i("VLC media session state=${snapshot.stateName} position=${snapshot.positionMs}")
+				snapshot
+			}
+		} catch (error: SecurityException) {
+			Timber.w(error, "Cannot access VLC media session; falling back to estimated external playback position")
+			null
+		}
+	}
+
+	private fun isVlcPackage(packageName: String): Boolean =
+		packageName in vlcPackageNames || packageName.contains("videolan", ignoreCase = true)
+
+	private val PlaybackState.stateName
+		get() = when (state) {
+			PlaybackState.STATE_NONE -> "NONE"
+			PlaybackState.STATE_STOPPED -> "STOPPED"
+			PlaybackState.STATE_PAUSED -> "PAUSED"
+			PlaybackState.STATE_PLAYING -> "PLAYING"
+			PlaybackState.STATE_FAST_FORWARDING -> "FAST_FORWARDING"
+			PlaybackState.STATE_REWINDING -> "REWINDING"
+			PlaybackState.STATE_BUFFERING -> "BUFFERING"
+			PlaybackState.STATE_ERROR -> "ERROR"
+			PlaybackState.STATE_CONNECTING -> "CONNECTING"
+			PlaybackState.STATE_SKIPPING_TO_PREVIOUS -> "SKIPPING_TO_PREVIOUS"
+			PlaybackState.STATE_SKIPPING_TO_NEXT -> "SKIPPING_TO_NEXT"
+			PlaybackState.STATE_SKIPPING_TO_QUEUE_ITEM -> "SKIPPING_TO_QUEUE_ITEM"
+			else -> "UNKNOWN_$state"
+		}
+
 	private suspend fun reportExternalPlaybackProgress(
 		item: BaseItemDto,
 		mediaSource: MediaSourceInfo,
-		position: Duration
+		position: Duration,
+		paused: Boolean
 	) {
 		runCatching {
 			withContext(Dispatchers.IO) {
@@ -298,7 +449,7 @@ class ExternalPlayerActivity : FragmentActivity() {
 						mediaSourceId = mediaSource.id,
 						positionTicks = position.inWholeTicks,
 						canSeek = (mediaSource.runTimeTicks ?: item.runTimeTicks ?: 0L) > 0L,
-						isPaused = false,
+						isPaused = paused,
 						playMethod = PlayMethod.DIRECT_PLAY,
 						liveStreamId = mediaSource.liveStreamId,
 						audioStreamIndex = mediaSource.defaultAudioStreamIndex,
@@ -310,7 +461,7 @@ class ExternalPlayerActivity : FragmentActivity() {
 				)
 			}
 		}
-			.onSuccess { Timber.i("External playback progress reported position=${position.inWholeMilliseconds}") }
+			.onSuccess { Timber.i("External playback progress reported position=${position.inWholeMilliseconds} paused=$paused") }
 			.onFailure { error -> Timber.w(error, "Failed to report external playback progress position=${position.inWholeMilliseconds}") }
 	}
 
@@ -332,17 +483,28 @@ class ExternalPlayerActivity : FragmentActivity() {
 
 		val returnedPosition = resultPositionExtras.firstNotNullOfOrNull { key -> extras.getDurationExtra(key) }
 		val returnedDuration = extras.getDurationExtra(API_VLC_RESULT_DURATION)
-		val estimatedPosition = getEstimatedExternalPlaybackPosition()
+		val pauseAwareTrackedPosition = getPauseAwareTrackedExternalPlaybackPositionForStop()
+		val wallClockFallbackPosition = getEstimatedExternalPlaybackPosition()
 		Timber.i(
 			"External player returned extra_position=${returnedPosition?.inWholeMilliseconds} " +
 				"extra_duration=${returnedDuration?.inWholeMilliseconds}"
 		)
 
-		val endPosition = if (returnedPosition != null && returnedPosition > Duration.ZERO) {
-			returnedPosition
-		} else {
-			Timber.i("Using estimated external playback position=${estimatedPosition.inWholeMilliseconds}")
-			estimatedPosition
+		val endPosition = when {
+			returnedPosition != null && returnedPosition > Duration.ZERO -> {
+				Timber.i("External playback stop using VLC extra_position=${returnedPosition.inWholeMilliseconds}")
+				returnedPosition
+			}
+
+			pauseAwareTrackedPosition != null -> {
+				Timber.i("External playback stop using pause-aware tracked position=${pauseAwareTrackedPosition.inWholeMilliseconds}")
+				pauseAwareTrackedPosition
+			}
+
+			else -> {
+				Timber.i("External playback stop using wall-clock fallback position=${wallClockFallbackPosition.inWholeMilliseconds}")
+				wallClockFallbackPosition
+			}
 		}
 
 		val runtime = (mediaSource.runTimeTicks ?: item.runTimeTicks)?.ticks
