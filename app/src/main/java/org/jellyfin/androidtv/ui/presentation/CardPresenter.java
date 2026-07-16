@@ -43,6 +43,8 @@ public class CardPresenter extends Presenter {
     private boolean mShowInfo = true;
     private boolean isUserView = false;
     private boolean isUniformAspect = false;
+    private boolean mUseHomeSecondaryText = false;
+    private boolean mUseReleaseYearSecondaryText = false;
     private final Lazy<ImageHelper> imageHelper = KoinJavaComponent.<ImageHelper>inject(ImageHelper.class);
 
     public CardPresenter() {
@@ -345,7 +347,8 @@ public class CardPresenter extends Presenter {
         holder.setItem(rowItem, mImageType, 130, 150, mStaticHeight);
 
         holder.mCardView.setTitleText(rowItem.getCardName(holder.mCardView.getContext()));
-        holder.mCardView.setContentText(rowItem.getSubText(holder.mCardView.getContext()));
+        String subText = rowItem.getSubText(holder.mCardView.getContext());
+        holder.mCardView.setContentText(getDisplaySubText(rowItem, subText));
         if (ImageType.POSTER.equals(mImageType)) {
             holder.mCardView.setOverlayInfo(rowItem);
         }
@@ -415,5 +418,99 @@ public class CardPresenter extends Presenter {
 
     public void setUniformAspect(boolean uniformAspect) {
         isUniformAspect = uniformAspect;
+    }
+
+    public void setUseHomeSecondaryText(boolean useHomeSecondaryText) {
+        mUseHomeSecondaryText = useHomeSecondaryText;
+    }
+
+    public void setUseReleaseYearSecondaryText(boolean useReleaseYearSecondaryText) {
+        mUseReleaseYearSecondaryText = useReleaseYearSecondaryText;
+    }
+
+    @Nullable
+    private String getDisplaySubText(BaseRowItem rowItem, @Nullable String subText) {
+        BaseItemDto item = rowItem.getBaseItem();
+        if (item == null) {
+            return subText;
+        }
+
+        if (mUseReleaseYearSecondaryText) {
+            return getReleaseYearSecondaryText(item, subText);
+        }
+
+        if (!mUseHomeSecondaryText) {
+            return subText;
+        }
+
+        return getHomeSecondaryText(item, subText);
+    }
+
+    @Nullable
+    private String getReleaseYearText(BaseItemDto item) {
+        Integer productionYear = item.getProductionYear();
+        if (isValidReleaseYear(productionYear)) {
+            return productionYear.toString();
+        }
+
+        if (item.getPremiereDate() != null && isValidReleaseYear(item.getPremiereDate().getYear())) {
+            return String.valueOf(item.getPremiereDate().getYear());
+        }
+
+        return null;
+    }
+
+    @Nullable
+    private String getReleaseYearSecondaryText(BaseItemDto item, @Nullable String subText) {
+        BaseItemKind itemType = item.getType();
+        if (itemType == BaseItemKind.MOVIE || itemType == BaseItemKind.SERIES || itemType == BaseItemKind.VIDEO) {
+            return getReleaseYearText(item);
+        }
+
+        return subText;
+    }
+
+    @Nullable
+    private String getHomeSecondaryText(BaseItemDto item, @Nullable String subText) {
+        BaseItemKind itemType = item.getType();
+        if (itemType == BaseItemKind.MOVIE || itemType == BaseItemKind.SERIES || itemType == BaseItemKind.VIDEO) {
+            return getReleaseYearText(item);
+        }
+
+        if (itemType == BaseItemKind.EPISODE) {
+            return getEpisodeHomeSubtitle(item);
+        }
+
+        return subText;
+    }
+
+    @Nullable
+    private String getEpisodeHomeSubtitle(BaseItemDto item) {
+        String releaseYear = getReleaseYearText(item);
+        String episodeName = getCleanText(item.getName());
+
+        if (releaseYear != null && episodeName != null) {
+            return releaseYear + " - " + episodeName;
+        }
+
+        if (releaseYear != null) {
+            return releaseYear;
+        }
+
+        return episodeName;
+    }
+
+    @Nullable
+    private String getCleanText(@Nullable String text) {
+        if (text == null) {
+            return null;
+        }
+
+        String trimmed = text.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private boolean isValidReleaseYear(@Nullable Integer year) {
+        return year != null && year >= 1000 && year <= 9999;
     }
 }

@@ -38,7 +38,6 @@ import org.jellyfin.androidtv.R;
 import org.jellyfin.androidtv.auth.repository.UserRepository;
 import org.jellyfin.androidtv.constant.CustomMessage;
 import org.jellyfin.androidtv.constant.QueryType;
-import org.jellyfin.androidtv.data.model.ChapterItemInfo;
 import org.jellyfin.androidtv.data.model.DataRefreshService;
 import org.jellyfin.androidtv.data.model.InfoItem;
 import org.jellyfin.androidtv.data.querying.GetAdditionalPartsRequest;
@@ -64,6 +63,9 @@ import org.jellyfin.androidtv.ui.playback.MediaManager;
 import org.jellyfin.androidtv.ui.playback.PlaybackLauncher;
 import org.jellyfin.androidtv.ui.presentation.CardPresenter;
 import org.jellyfin.androidtv.ui.presentation.CustomListRowPresenter;
+import org.jellyfin.androidtv.ui.presentation.FileInfoCardPresenter;
+import org.jellyfin.androidtv.ui.presentation.FileInfoListRow;
+import org.jellyfin.androidtv.ui.presentation.FileInfoListRowPresenter;
 import org.jellyfin.androidtv.ui.presentation.InfoCardPresenter;
 import org.jellyfin.androidtv.ui.presentation.MutableObjectAdapter;
 import org.jellyfin.androidtv.ui.presentation.MyDetailsOverviewRowPresenter;
@@ -135,6 +137,7 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
 
     private Handler mLoopHandler = new Handler();
     private Runnable mClockLoop;
+    private boolean mEndTimeInInfoItem2;
 
     BaseItemDto mBaseItem;
 
@@ -316,8 +319,12 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
                 MyDetailsOverviewRowPresenter.ViewHolder viewholder = mDorPresenter.getViewHolder();
                 if (viewholder == null) return;
 
-                if (mBaseItem != null && ((mBaseItem.getRunTimeTicks() != null && mBaseItem.getRunTimeTicks() > 0) || mBaseItem.getRunTimeTicks() != null)) {
-                    viewholder.setInfoValue3(getEndTime());
+                if (mBaseItem != null && mBaseItem.getType() != BaseItemKind.SERIES && ((mBaseItem.getRunTimeTicks() != null && mBaseItem.getRunTimeTicks() > 0) || mBaseItem.getRunTimeTicks() != null)) {
+                    if (mEndTimeInInfoItem2) {
+                        viewholder.setInfoValue2(getEndTime());
+                    } else {
+                        viewholder.setInfoValue3(getEndTime());
+                    }
                     mLoopHandler.postDelayed(this, 15000);
                 }
             }
@@ -430,31 +437,45 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
                     break;
                 default:
 
-                    BaseItemPerson director = BaseItemExtensionsKt.getFirstPerson(item, PersonKind.DIRECTOR);
-
-                    InfoItem firstRow;
                     if (item.getType() == BaseItemKind.SERIES) {
-                        firstRow = new InfoItem(
+                        mDetailsOverviewRow.setInfoItem1(new InfoItem(
                                 getString(R.string.lbl_seasons),
-                                String.format("%d", Utils.getSafeValue(item.getChildCount(), 0)));
-                    } else {
-                        firstRow = new InfoItem(
-                                getString(R.string.lbl_directed_by),
-                                director != null ? director.getName() : getString(R.string.lbl_bracket_unknown));
-                    }
-                    mDetailsOverviewRow.setInfoItem1(firstRow);
-
-                    if ((item.getRunTimeTicks() != null && item.getRunTimeTicks() > 0) || item.getRunTimeTicks() != null) {
-                        mDetailsOverviewRow.setInfoItem2(new InfoItem(getString(R.string.lbl_runs), getRunTime()));
-                        ClockBehavior clockBehavior = userPreferences.getValue().get(UserPreferences.Companion.getClockBehavior());
-                        if (clockBehavior == ClockBehavior.ALWAYS || clockBehavior == ClockBehavior.IN_MENUS) {
-                            mDetailsOverviewRow.setInfoItem3(new InfoItem(getString(R.string.lbl_ends), getEndTime()));
-                        } else {
-                            mDetailsOverviewRow.setInfoItem3(new InfoItem());
-                        }
-                    } else {
+                                String.format("%d", Utils.getSafeValue(item.getChildCount(), 0))));
                         mDetailsOverviewRow.setInfoItem2(new InfoItem());
                         mDetailsOverviewRow.setInfoItem3(new InfoItem());
+                        mEndTimeInInfoItem2 = false;
+                    } else if ((item.getRunTimeTicks() != null && item.getRunTimeTicks() > 0) || item.getRunTimeTicks() != null) {
+                        int runTimeInfoIndex = item.getType() == BaseItemKind.SERIES ? 2 : 1;
+                        InfoItem runTime = new InfoItem(getString(R.string.lbl_runs), getRunTime());
+                        if (runTimeInfoIndex == 1) {
+                            // Details omit "Directed by", so runtime moves up with no empty row.
+                            mDetailsOverviewRow.setInfoItem1(runTime);
+                        } else {
+                            mDetailsOverviewRow.setInfoItem2(runTime);
+                        }
+
+                        ClockBehavior clockBehavior = userPreferences.getValue().get(UserPreferences.Companion.getClockBehavior());
+                        if (clockBehavior == ClockBehavior.ALWAYS || clockBehavior == ClockBehavior.IN_MENUS) {
+                            InfoItem endTime = new InfoItem(getString(R.string.lbl_ends), getEndTime());
+                            if (runTimeInfoIndex == 1) {
+                                mDetailsOverviewRow.setInfoItem2(endTime);
+                                mDetailsOverviewRow.setInfoItem3(new InfoItem());
+                                mEndTimeInInfoItem2 = true;
+                            } else {
+                                mDetailsOverviewRow.setInfoItem3(endTime);
+                                mEndTimeInInfoItem2 = false;
+                            }
+                        } else {
+                            mDetailsOverviewRow.setInfoItem3(new InfoItem());
+                            mEndTimeInInfoItem2 = false;
+                        }
+                    } else {
+                        if (item.getType() != BaseItemKind.SERIES) {
+                            mDetailsOverviewRow.setInfoItem1(new InfoItem());
+                        }
+                        mDetailsOverviewRow.setInfoItem2(new InfoItem());
+                        mDetailsOverviewRow.setInfoItem3(new InfoItem());
+                        mEndTimeInInfoItem2 = false;
                     }
 
             }
@@ -473,6 +494,7 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
             ClassPresenterSelector ps = new ClassPresenterSelector();
             ps.addClassPresenter(MyDetailsOverviewRow.class, mDorPresenter);
             mListRowPresenter = new CustomListRowPresenter(Utils.convertDpToPixel(requireContext(), 10));
+            ps.addClassPresenter(FileInfoListRow.class, new FileInfoListRowPresenter(Utils.convertDpToPixel(requireContext(), 10)));
             ps.addClassPresenter(ListRow.class, mListRowPresenter);
             mRowsAdapter = new MutableObjectAdapter<Row>(ps);
             mRowsFragment.setAdapter(mRowsAdapter);
@@ -545,17 +567,13 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
                     addItemRow(adapter, new ItemRowAdapter(requireContext(), new GetTrailersRequest(mBaseItem.getId()), new CardPresenter(), adapter), 4, getString(R.string.lbl_trailers));
                 }
 
-                //Chapters
-                if (mBaseItem.getChapters() != null && !mBaseItem.getChapters().isEmpty()) {
-                    List<ChapterItemInfo> chapters = BaseItemExtensionsKt.buildChapterItems(mBaseItem, api.getValue());
-                    ItemRowAdapter chapterAdapter = new ItemRowAdapter(requireContext(), chapters, new CardPresenter(true, 120), adapter);
-                    addItemRow(adapter, chapterAdapter, 2, getString(R.string.lbl_chapters));
-                }
-
                 //Similar
-                ItemRowAdapter similarMoviesAdapter = new ItemRowAdapter(requireContext(), BrowsingUtils.createSimilarItemsRequest(mBaseItem.getId()), QueryType.SimilarMovies, new CardPresenter(), adapter);
+                CardPresenter similarMoviesPresenter = new CardPresenter();
+                similarMoviesPresenter.setUseReleaseYearSecondaryText(true);
+                ItemRowAdapter similarMoviesAdapter = new ItemRowAdapter(requireContext(), BrowsingUtils.createSimilarItemsRequest(mBaseItem.getId()), QueryType.SimilarMovies, similarMoviesPresenter, adapter);
                 addItemRow(adapter, similarMoviesAdapter, 5, getString(R.string.lbl_more_like_this));
 
+                addFileInfoRow(adapter);
                 addInfoRows(adapter);
                 break;
             case TRAILER:
@@ -607,7 +625,9 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
                     addItemRow(adapter, seriesCastAdapter, 3, getString(R.string.lbl_cast_crew));
                 }
 
-                ItemRowAdapter similarAdapter = new ItemRowAdapter(requireContext(), BrowsingUtils.createSimilarItemsRequest(mBaseItem.getId()), QueryType.SimilarSeries, new CardPresenter(), adapter);
+                CardPresenter similarSeriesPresenter = new CardPresenter();
+                similarSeriesPresenter.setUseReleaseYearSecondaryText(true);
+                ItemRowAdapter similarAdapter = new ItemRowAdapter(requireContext(), BrowsingUtils.createSimilarItemsRequest(mBaseItem.getId()), QueryType.SimilarSeries, similarSeriesPresenter, adapter);
                 addItemRow(adapter, similarAdapter, 4, getString(R.string.lbl_more_like_this));
                 break;
 
@@ -630,13 +650,7 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
                     }
                 }
 
-                //Chapters
-                if (mBaseItem.getChapters() != null && !mBaseItem.getChapters().isEmpty()) {
-                    List<ChapterItemInfo> chapters = BaseItemExtensionsKt.buildChapterItems(mBaseItem, api.getValue());
-                    ItemRowAdapter chapterAdapter = new ItemRowAdapter(requireContext(), chapters, new CardPresenter(true, 120), adapter);
-                    addItemRow(adapter, chapterAdapter, 1, getString(R.string.lbl_chapters));
-                }
-
+                addFileInfoRow(adapter);
                 addInfoRows(adapter);
                 break;
 
@@ -660,6 +674,19 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
                 }
             }
         }
+    }
+
+    private void addFileInfoRow(MutableObjectAdapter<Row> adapter) {
+        List<String> fileInfoCards = FileInfoRowHelperKt.buildFileInfoCards(requireContext(), mBaseItem);
+        if (fileInfoCards.isEmpty()) return;
+
+        HeaderItem header = new HeaderItem(adapter.size(), getString(R.string.lbl_file_information));
+        ArrayObjectAdapter fileInfoAdapter = new ArrayObjectAdapter(new FileInfoCardPresenter());
+        for (String fileInfoCard : fileInfoCards) {
+            fileInfoAdapter.add(fileInfoCard);
+        }
+
+        adapter.add(new FileInfoListRow(header, fileInfoAdapter));
     }
 
     private void updateInfo(BaseItemDto item) {
@@ -849,7 +876,8 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
             mDetailsOverviewRow.addAction(mVersionsButton);
         }
 
-        if (TrailerUtils.hasPlayableTrailers(requireContext(), mBaseItem)) {
+        trailerButton = null;
+        if (shouldShowTrailerButton(mBaseItem) && TrailerUtils.hasPlayableTrailers(requireContext(), mBaseItem)) {
             trailerButton = TextUnderButton.create(requireContext(), R.drawable.ic_trailer, buttonSize, 0, getString(R.string.lbl_play_trailers), new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -1066,6 +1094,10 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
         mDetailsOverviewRow.addAction(moreButton);
         if (mBaseItem.getType() != BaseItemKind.EPISODE)
             showMoreButtonIfNeeded();  //Episodes check for previous and then call this above
+    }
+
+    private boolean shouldShowTrailerButton(BaseItemDto item) {
+        return item.getType() != BaseItemKind.MOVIE && item.getType() != BaseItemKind.SERIES;
     }
 
     private void handleResumeButtonAndFocus(BaseItemDto nextUpEpisode) {

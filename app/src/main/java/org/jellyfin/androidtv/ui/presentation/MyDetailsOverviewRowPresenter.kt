@@ -32,6 +32,11 @@ class MyDetailsOverviewRowPresenter(
 
 			binding.infoTitle3.text = row.infoItem3?.label
 			binding.infoValue3.text = row.infoItem3?.value
+			val showRuntimeInfo = row.item.type != BaseItemKind.SERIES
+			binding.infoTitle2.isVisible = showRuntimeInfo
+			binding.infoValue2.isVisible = showRuntimeInfo
+			binding.infoTitle3.isVisible = showRuntimeInfo
+			binding.infoValue3.isVisible = showRuntimeInfo
 
 			binding.mainImage.load(row.imageDrawable, null, null, 1.0, 0)
 
@@ -57,6 +62,10 @@ class MyDetailsOverviewRowPresenter(
 
 		fun setSummary(summary: String?) {
 			binding.fdSummaryText.text = summary?.let { markdownRenderer.toMarkdownSpanned(it) }
+		}
+
+		fun setInfoValue2(text: String?) {
+			binding.infoValue2.text = text
 		}
 
 		fun setInfoValue3(text: String?) {
