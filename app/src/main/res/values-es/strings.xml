@@ -29,6 +29,8 @@
     <string name="lbl_play_all">Reproducir todo</string>
     <string name="lbl_shuffle_all">Mezclar todo</string>
     <string name="lbl_play">Reproducir</string>
+    <string name="lbl_play_with_kodi">Reproducir con Kodi</string>
+    <string name="msg_kodi_not_installed">Kodi no está instalado</string>
     <string name="lbl_cancel">Cancelar</string>
     <string name="lbl_record">Grabar</string>
     <string name="msg_set_to_record">Programa establecido para grabar</string>

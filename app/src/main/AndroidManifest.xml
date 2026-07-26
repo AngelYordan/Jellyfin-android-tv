@@ -29,6 +29,8 @@
         android:required="false" />
 
     <queries>
+        <package android:name="org.xbmc.kodi" />
+
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <data

@@ -30,6 +30,8 @@
     <string name="lbl_play_all">Reproducir todos</string>
     <string name="lbl_shuffle_all">Mezclar todos</string>
     <string name="lbl_play">Reproducir</string>
+    <string name="lbl_play_with_kodi">Reproducir con Kodi</string>
+    <string name="msg_kodi_not_installed">Kodi no está instalado</string>
     <string name="lbl_cancel">Cancelar</string>
     <string name="lbl_cancel_recording">Cancelar grabación</string>
     <string name="lbl_cancel_series">Cancelar serie</string>

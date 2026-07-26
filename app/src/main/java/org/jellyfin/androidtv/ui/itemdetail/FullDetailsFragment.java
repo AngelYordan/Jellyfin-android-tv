@@ -242,6 +242,7 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
                 if (!getLifecycle().getCurrentState().isAtLeast(Lifecycle.State.STARTED)) return;
 
                 Instant lastPlaybackTime = dataRefreshService.getValue().getLastPlayback();
+                boolean wasKodiPlayback = "org.xbmc.kodi".equals(dataRefreshService.getValue().getLastExternalPlaybackPackage());
                 Timber.d("current time %s last playback event time %s last refresh time %s", Instant.now().toEpochMilli(), lastPlaybackTime, mLastUpdated.toEpochMilli());
 
                 // if last playback event exists, and event time is greater than last sync or within 2 seconds of current time
@@ -253,11 +254,16 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
                         loadItem(lastPlayedItem.getId());
                         dataRefreshService.getValue().setLastPlayedItem(null); //blank this out so a detail screen we back up to doesn't also do this
                     } else {
+                        if (wasKodiPlayback) Timber.i("Refreshing details item after external Kodi playback");
                         Timber.i("Updating info after playback");
                         FullDetailsFragmentHelperKt.getItem(FullDetailsFragment.this, mBaseItem.getId(), item -> {
                             if (item == null) return null;
 
                             mBaseItem = item;
+                            if (wasKodiPlayback && mBaseItem.getUserData() != null) {
+                                Timber.i("Updated resume position ticks=%d", mBaseItem.getUserData().getPlaybackPositionTicks());
+                                dataRefreshService.getValue().setLastExternalPlaybackPackage(null);
+                            }
                             if (mResumeButton != null) {
                                 boolean resumeVisible = (mBaseItem.getType() == BaseItemKind.SERIES && !mBaseItem.getUserData().getPlayed()) || JavaCompat.getCanResume(mBaseItem);
                                 mResumeButton.setVisibility(resumeVisible ? View.VISIBLE : View.GONE);
@@ -301,6 +307,11 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
             return keyProcessor.getValue().handleKey(keyCode, mCurrentItem, requireActivity());
         } else if ((keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY) && BaseItemExtensionsKt.canPlay(mBaseItem)) {
             //default play action
+            if (isMovieOrEpisode(mBaseItem)) {
+                Timber.i("Play from beginning selected item=%s requestedPositionTicks=0", mBaseItem.getId());
+                play(mBaseItem, 0, false, true);
+                return true;
+            }
             Long pos = mBaseItem.getUserData().getPlaybackPositionTicks() / 10000;
             play(mBaseItem, pos.intValue(), false);
             return true;
@@ -782,10 +793,12 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
     TextUnderButton deleteButton = null;
     TextUnderButton moreButton;
     TextUnderButton playButton = null;
+    TextUnderButton playWithButton = null;
     TextUnderButton trailerButton = null;
 
     private void addButtons(int buttonSize) {
         BaseItemDto baseItem = mBaseItem;
+        boolean isMovieOrEpisodeDetails = isMovieOrEpisode(baseItem);
         String buttonLabel;
         if (baseItem.getType() == BaseItemKind.SERIES) {
             buttonLabel = getString(R.string.lbl_play_next_up);
@@ -804,17 +817,30 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
         });
 
         if (BaseItemExtensionsKt.canPlay(baseItem)) {
-            mDetailsOverviewRow.addAction(mResumeButton);
             boolean isSeries = baseItem.getType() == BaseItemKind.SERIES;
             boolean isStarted = baseItem.getUserData().getPlayedPercentage() != null && baseItem.getUserData().getPlayedPercentage() > 0;
 
             playButton = TextUnderButton.create(requireContext(), R.drawable.ic_play, buttonSize, 2, getString(BaseItemExtensionsKt.isLiveTv(mBaseItem) ? R.string.lbl_tune_to_channel : Utils.getSafeValue(mBaseItem.isFolder(), false) ? R.string.lbl_play_all : R.string.lbl_play), new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
+                    if (isMovieOrEpisode(mBaseItem)) {
+                        Timber.i("Play from beginning selected item=%s requestedPositionTicks=0", mBaseItem.getId());
+                        play(mBaseItem, 0, false, true);
+                        return;
+                    }
                     play(mBaseItem, 0, false);
                 }
             });
-            mDetailsOverviewRow.addAction(playButton);
+
+            if (isMovieOrEpisodeDetails) {
+                mDetailsOverviewRow.addAction(playButton);
+                mDetailsOverviewRow.addAction(mResumeButton);
+                addPlayWithButton(buttonSize);
+                addMoreButton(buttonSize);
+            } else {
+                mDetailsOverviewRow.addAction(mResumeButton);
+                mDetailsOverviewRow.addAction(playButton);
+            }
 
             if (isSeries && !isStarted) {
                 FullDetailsFragmentHelperKt.getNextUpEpisode(this, nextUpEpisode -> {
@@ -1083,6 +1109,26 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
         }
 
         //Now, create a more button to show if needed
+        if (!isMovieOrEpisodeDetails || moreButton == null) {
+            addMoreButton(buttonSize);
+        }
+
+        if (mBaseItem.getType() != BaseItemKind.EPISODE)
+            showMoreButtonIfNeeded();  //Episodes check for previous and then call this above
+    }
+
+    private void addPlayWithButton(int buttonSize) {
+        playWithButton = TextUnderButton.create(requireContext(), R.drawable.ic_tv_play, buttonSize, 2, getString(R.string.lbl_play_with_kodi), new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showPlayWithKodiDialog(mBaseItem);
+            }
+        });
+
+        mDetailsOverviewRow.addAction(playWithButton);
+    }
+
+    private void addMoreButton(int buttonSize) {
         moreButton = TextUnderButton.create(requireContext(), R.drawable.ic_more, buttonSize, 0, getString(R.string.lbl_other_options), new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -1092,12 +1138,60 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
 
         moreButton.setVisibility(View.GONE);
         mDetailsOverviewRow.addAction(moreButton);
-        if (mBaseItem.getType() != BaseItemKind.EPISODE)
-            showMoreButtonIfNeeded();  //Episodes check for previous and then call this above
     }
 
     private boolean shouldShowTrailerButton(BaseItemDto item) {
         return item.getType() != BaseItemKind.MOVIE && item.getType() != BaseItemKind.SERIES;
+    }
+
+    private boolean isMovieOrEpisode(BaseItemDto item) {
+        return item.getType() == BaseItemKind.MOVIE || item.getType() == BaseItemKind.EPISODE;
+    }
+
+    private void showPlayWithKodiDialog(final BaseItemDto item) {
+        Timber.i("Play with Kodi selected item=%s", item.getId());
+        final long resumeTicks = item.getUserData() != null ? Math.max(item.getUserData().getPlaybackPositionTicks(), 0) : 0;
+        final long resumeMs = resumeTicks / 10000;
+        final boolean hasResume = resumeMs > 0;
+        Timber.i("Play with Kodi dialog resumeTicks=%d resumeMs=%d", resumeTicks, resumeMs);
+
+        List<CharSequence> options = new ArrayList<>();
+        options.add(getString(R.string.lbl_from_beginning));
+        if (hasResume) {
+            options.add(getString(R.string.lbl_resume_from, TimeUtils.formatMillis(resumeMs)));
+        }
+
+        new AlertDialog.Builder(requireContext())
+                .setTitle(R.string.lbl_play_with_kodi)
+                .setItems(options.toArray(new CharSequence[0]), new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        if (which == 0) {
+                            Timber.i("Play with Kodi from beginning selected ticks=0 ms=0");
+                            playWithKodi(item, 0);
+                        } else {
+                            Timber.i("Play with Kodi resume selected ticks=%d ms=%d", resumeTicks, resumeMs);
+                            playWithKodi(item, (int) resumeMs);
+                        }
+                    }
+                })
+                .show();
+    }
+
+    private void playWithKodi(final BaseItemDto item, final int positionMs) {
+        playbackHelper.getValue().getItemsToPlay(getContext(), item, false, false, new Response<List<BaseItemDto>>(getLifecycle()) {
+            @Override
+            public void onResponse(List<BaseItemDto> response) {
+                if (!isActive()) return;
+                if (response.isEmpty()) {
+                    Timber.e("No items to play - ignoring play with request.");
+                    return;
+                }
+
+                interactionTracker.getValue().notifyStartSession(item, response);
+                KoinJavaComponent.<PlaybackLauncher>get(PlaybackLauncher.class).launchExternalPlayerPackage(getContext(), response, "org.xbmc.kodi", positionMs, 0, false);
+            }
+        });
     }
 
     private void handleResumeButtonAndFocus(BaseItemDto nextUpEpisode) {
@@ -1111,7 +1205,9 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
         boolean resumeButtonVisible = (isSeries && isStarted && !isFinished) || (JavaCompat.getCanResume(mBaseItem));
         mResumeButton.setVisibility(resumeButtonVisible ? View.VISIBLE : View.GONE);
 
-        if (resumeButtonVisible) {
+        if (isMovieOrEpisode(mBaseItem)) {
+            playButton.requestFocus();
+        } else if (resumeButtonVisible) {
             mResumeButton.requestFocus();
         } else {
             playButton.requestFocus();
@@ -1246,7 +1342,13 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
     }
 
     void play(final BaseItemDto item, final int pos, final boolean shuffle) {
-        playbackHelper.getValue().getItemsToPlay(getContext(), item, pos == 0 && item.getType() == BaseItemKind.MOVIE, shuffle, new Response<List<BaseItemDto>>(getLifecycle()) {
+        play(item, pos, shuffle, pos == 0);
+    }
+
+    void play(final BaseItemDto item, final int pos, final boolean shuffle, final boolean fromBeginning) {
+        final int startPositionMs = Math.max(pos, 0);
+        boolean allowIntros = fromBeginning && startPositionMs == 0 && item.getType() == BaseItemKind.MOVIE;
+        playbackHelper.getValue().getItemsToPlay(getContext(), item, allowIntros, shuffle, new Response<List<BaseItemDto>>(getLifecycle()) {
             @Override
             public void onResponse(List<BaseItemDto> response) {
                 if (!isActive()) return;
@@ -1256,14 +1358,15 @@ public class FullDetailsFragment extends Fragment implements RecordingIndicatorV
                 }
 
                 interactionTracker.getValue().notifyStartSession(item, response);
-                KoinJavaComponent.<PlaybackLauncher>get(PlaybackLauncher.class).launch(getContext(), response, pos, false, 0, shuffle);
+                KoinJavaComponent.<PlaybackLauncher>get(PlaybackLauncher.class).launch(getContext(), response, startPositionMs, false, 0, shuffle);
             }
         });
     }
 
     void play(final List<BaseItemDto> items, final int pos, final boolean shuffle) {
         if (items.isEmpty()) return;
+        final int startPositionMs = Math.max(pos, 0);
         if (shuffle) Collections.shuffle(items);
-        KoinJavaComponent.<PlaybackLauncher>get(PlaybackLauncher.class).launch(getContext(), items, pos);
+        KoinJavaComponent.<PlaybackLauncher>get(PlaybackLauncher.class).launch(getContext(), items, startPositionMs);
     }
 }

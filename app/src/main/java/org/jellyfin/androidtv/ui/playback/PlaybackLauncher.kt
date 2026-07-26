@@ -8,7 +8,7 @@ import org.jellyfin.androidtv.ui.navigation.NavigationRepository
 import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.MediaType
-import kotlin.time.Duration
+import timber.log.Timber
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
@@ -57,15 +57,54 @@ class PlaybackLauncher(
 
 			if (items.isEmpty()) return
 
+			val startPositionMs = position?.coerceAtLeast(0) ?: 0
+			val startPositionTicks = startPositionMs * 10000L
+			val launchItem = items.getOrNull(itemsPosition) ?: items.first()
+			Timber.i("Launching playback item=${launchItem.id} finalStartPositionTicks=$startPositionTicks")
+
 			if (userPreferences[UserPreferences.useExternalPlayer] && items.all { it.supportsExternalPlayer }) {
-				context.startActivity(ActivityDestinations.externalPlayer(context, position?.milliseconds ?: Duration.ZERO))
+				Timber.i("Launching external playback item=${launchItem.id} finalStartPositionTicks=$startPositionTicks")
+				context.startActivity(ActivityDestinations.externalPlayer(context, startPositionMs.milliseconds))
 			} else if (userPreferences[UserPreferences.playbackRewriteVideoEnabled]) {
-				val destination = Destinations.videoPlayerNew(position)
+				val destination = Destinations.videoPlayerNew(startPositionMs)
 				navigationRepository.navigate(destination, replace)
 			} else {
-				val destination = Destinations.videoPlayer(position)
+				val destination = Destinations.videoPlayer(startPositionMs)
 				navigationRepository.navigate(destination, replace)
 			}
 		}
+	}
+
+	@JvmOverloads
+	fun launchExternalPlayerPackage(
+		context: Context,
+		items: List<BaseItemDto>,
+		externalPlayerPackage: String,
+		position: Int = 0,
+		itemsPosition: Int = 0,
+		shuffle: Boolean = false,
+	) {
+		val items = if (shuffle) items.shuffled() else items
+
+		videoQueueManager.setCurrentVideoQueue(items.toList())
+		videoQueueManager.setCurrentMediaPosition(itemsPosition)
+
+		if (items.isEmpty()) return
+
+		val startPositionMs = position.coerceAtLeast(0)
+		val startPositionTicks = startPositionMs * 10000L
+		val launchItem = items.getOrNull(itemsPosition) ?: items.first()
+		if (externalPlayerPackage == "org.xbmc.kodi") {
+			Timber.i("Launching Kodi playback requestedStartTicks=$startPositionTicks requestedStartMs=$startPositionMs")
+		} else {
+			Timber.i("Launching external playback with package=$externalPlayerPackage positionTicks=$startPositionTicks item=${launchItem.id}")
+		}
+		context.startActivity(
+			ActivityDestinations.externalPlayer(
+				context,
+				startPositionMs.milliseconds,
+				externalPlayerPackage = externalPlayerPackage,
+			)
+		)
 	}
 }

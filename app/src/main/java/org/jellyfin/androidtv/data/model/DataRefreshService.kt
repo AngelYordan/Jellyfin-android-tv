@@ -12,4 +12,5 @@ class DataRefreshService {
 	var lastLibraryChange: Instant? = null
 	var lastFavoriteUpdate: Instant? = null
 	var lastPlayedItem: BaseItemDto? = null
+	var lastExternalPlaybackPackage: String? = null
 }

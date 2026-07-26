@@ -258,7 +258,9 @@ fun FullDetailsFragment.resumePlayback(v: View) {
 	if (mBaseItem.type != BaseItemKind.SERIES) {
 		val pos = (mBaseItem.userData?.playbackPositionTicks?.ticks
 			?: Duration.ZERO) - resumePreroll.milliseconds
-		play(mBaseItem, pos.inWholeMilliseconds.toInt(), false)
+		val startPositionMs = pos.inWholeMilliseconds.coerceAtLeast(0)
+		Timber.i("Resume selected item=${mBaseItem.id} requestedPositionTicks=${startPositionMs * 10000}")
+		play(mBaseItem, startPositionMs.toInt(), false, false)
 		return
 	}
 
@@ -290,10 +292,13 @@ fun FullDetailsFragment.showResumeMenu(
 			TimeUtils.formatMillis(pos.inWholeMilliseconds)
 		)
 	) {
-		play(nextUpEpisode, pos.inWholeMilliseconds.toInt(), false)
+		val startPositionMs = pos.inWholeMilliseconds.coerceAtLeast(0)
+		Timber.i("Resume selected item=${nextUpEpisode.id} requestedPositionTicks=${startPositionMs * 10000}")
+		play(nextUpEpisode, startPositionMs.toInt(), false, false)
 	}
 	item(getString(R.string.lbl_from_beginning)) {
-		play(nextUpEpisode, 0, false)
+		Timber.i("Play from beginning selected item=${nextUpEpisode.id} requestedPositionTicks=0")
+		play(nextUpEpisode, 0, false, true)
 	}
 }.showIfNotEmpty()
 
