@@ -152,7 +152,8 @@ class ExternalPlayerActivity : FragmentActivity() {
 	private var lastKnownVlcState: Int? = null
 	private var lastKnownKodiState: Int? = null
 	private var lastKnownKodiPositionMs: Long? = null
-	private var kodiPlaybackObserved = false
+	private val kodiPlaybackStopDetector = KodiPlaybackStopDetector()
+	private var expectedKodiStreamUrl: String? = null
 	private var kodiJsonRpcUnavailableLogged = false
 	private var kodiMediaSessionUnavailableLogged = false
 	private var kodiJsonRpcRequestId = 0
@@ -173,6 +174,7 @@ class ExternalPlayerActivity : FragmentActivity() {
 		val positionMs: Long?,
 		val lastPositionUpdateTimeMs: Long?,
 		val source: KodiPositionSource,
+		val stopConfirmed: Boolean = false,
 	)
 
 	private enum class KodiPositionSource {
@@ -309,7 +311,8 @@ class ExternalPlayerActivity : FragmentActivity() {
 			lastKnownVlcState = null
 			lastKnownKodiState = null
 			lastKnownKodiPositionMs = if (requestedPackage == KODI_PACKAGE) externalPlaybackStartPositionMs else null
-			kodiPlaybackObserved = false
+			kodiPlaybackStopDetector.reset()
+			expectedKodiStreamUrl = if (requestedPackage == KODI_PACKAGE) url else null
 			kodiJsonRpcUnavailableLogged = false
 			kodiMediaSessionUnavailableLogged = false
 			externalPlaybackStopHandled = false
@@ -542,14 +545,12 @@ class ExternalPlayerActivity : FragmentActivity() {
 		val statePositionMs = kodiState.positionMs
 		val updatedPositionMs = when (kodiState.state) {
 			PlaybackState.STATE_PLAYING -> {
-				kodiPlaybackObserved = true
 				statePositionMs ?: (currentPositionMs + elapsedMs)
 			}
 
 			PlaybackState.STATE_PAUSED,
 			PlaybackState.STATE_BUFFERING,
 				-> {
-				kodiPlaybackObserved = true
 				statePositionMs ?: currentPositionMs
 			}
 
@@ -579,7 +580,7 @@ class ExternalPlayerActivity : FragmentActivity() {
 
 				else -> false
 			},
-			stopped = kodiPlaybackObserved && kodiState.state in setOf(PlaybackState.STATE_STOPPED, PlaybackState.STATE_NONE),
+			stopped = kodiState.stopConfirmed,
 		)
 	}
 
@@ -621,19 +622,9 @@ class ExternalPlayerActivity : FragmentActivity() {
 			val activePlayer = activePlayers
 				.mapNotNull { it as? JsonObject }
 				.firstOrNull { it["type"]?.jsonPrimitive?.contentOrNull == "video" }
-				?: activePlayers.mapNotNull { it as? JsonObject }.firstOrNull()
 
 			if (activePlayer == null) {
-				if (kodiPlaybackObserved) {
-					return@runCatching KodiPlaybackSnapshot(
-						state = PlaybackState.STATE_STOPPED,
-						stateName = playbackStateName(PlaybackState.STATE_STOPPED),
-						positionMs = lastKnownKodiPositionMs,
-						lastPositionUpdateTimeMs = null,
-						source = KodiPositionSource.JSON_RPC,
-					)
-				}
-				return@runCatching null
+				return@runCatching kodiNoActivePlayerSnapshot()
 			}
 
 			val playerId = activePlayer["playerid"]?.jsonPrimitive?.intOrNull ?: return@runCatching null
@@ -644,7 +635,24 @@ class ExternalPlayerActivity : FragmentActivity() {
 			) ?: return@runCatching null
 			val properties = propertiesResponse["result"]?.jsonObject ?: return@runCatching null
 			val positionMs = properties["time"]?.jsonObject?.toKodiMilliseconds()
-			val speed = properties["speed"]?.jsonPrimitive?.intOrNull ?: 0
+			val durationMs = properties["totaltime"]?.jsonObject?.toKodiMilliseconds()
+			val speed = properties["speed"]?.jsonPrimitive?.intOrNull ?: return@runCatching null
+			val itemResponse = kodiJsonRpcRequest(
+				"""{"jsonrpc":"2.0","method":"Player.GetItem","params":{"playerid":$playerId,"properties":["file"]},"id":${nextKodiJsonRpcRequestId()}}"""
+			) ?: return@runCatching null
+			val playingFile = itemResponse["result"]?.jsonObject?.get("item")?.jsonObject?.get("file")?.jsonPrimitive?.contentOrNull
+			if (!KodiPlaybackStopDetector.isReadyPlayer(expectedKodiStreamUrl, playingFile, positionMs, durationMs)) {
+				kodiPlaybackStopDetector.observeUnavailablePlayer()
+				Timber.i("Kodi JSON-RPC waiting for requested video and playback timing")
+				return@runCatching KodiPlaybackSnapshot(
+					state = PlaybackState.STATE_BUFFERING,
+					stateName = playbackStateName(PlaybackState.STATE_BUFFERING),
+					positionMs = lastKnownKodiPositionMs,
+					lastPositionUpdateTimeMs = null,
+					source = KodiPositionSource.JSON_RPC,
+				)
+			}
+			kodiPlaybackStopDetector.observeReadyPlayer()
 			val state = if (speed > 0) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED
 			Timber.i("Kodi JSON-RPC positionMs=$positionMs speed=$speed")
 
@@ -657,7 +665,23 @@ class ExternalPlayerActivity : FragmentActivity() {
 			)
 		}.onFailure { error ->
 			logKodiJsonRpcUnavailable(error)
-		}.getOrNull()
+		}.getOrNull().also { snapshot ->
+			if (snapshot == null) kodiPlaybackStopDetector.observeUnavailablePlayer()
+		}
+	}
+
+	private fun kodiNoActivePlayerSnapshot(): KodiPlaybackSnapshot {
+		val stopConfirmed = kodiPlaybackStopDetector.observeNoPlayer(SystemClock.elapsedRealtime())
+		val state = if (stopConfirmed) PlaybackState.STATE_STOPPED else PlaybackState.STATE_BUFFERING
+		Timber.i("Kodi JSON-RPC no active video; stopConfirmed=$stopConfirmed")
+		return KodiPlaybackSnapshot(
+			state = state,
+			stateName = playbackStateName(state),
+			positionMs = lastKnownKodiPositionMs,
+			lastPositionUpdateTimeMs = null,
+			source = KodiPositionSource.JSON_RPC,
+			stopConfirmed = stopConfirmed,
+		)
 	}
 
 	private fun queryKodiMediaSessionPlaybackState(): KodiPlaybackSnapshot? {
